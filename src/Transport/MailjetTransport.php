@@ -1,234 +1,155 @@
-<?php namespace Sboo\Laravel5Mailjet\Transport;
+<?php
 
-use GuzzleHttp\Post\PostBody;
-use Swift_Transport;
-use GuzzleHttp\Client;
-use Swift_Mime_Message;
-use GuzzleHttp\Post\PostFile;
-use Swift_Events_EventListener;
+namespace Sboo\Laravel5Mailjet\Transport;
 
-class MailjetTransport implements Swift_Transport {
+use Illuminate\Mail\Transport\Transport;
+use Sboo\Laravel5Mailjet\Api\Mailjet;
+use Swift_Attachment;
+use Swift_Mime_SimpleMessage;
+use Swift_MimePart;
+use Swift_Mime_Headers_UnstructuredHeader;
 
+class MailjetTransport extends Transport
+{
     /**
-     * The Mailjet API key.
+     * The Mailjet instance.
      *
-     * @var string
+     * @var \Sboo\Laravel5Mailjet\Api\Mailjet
      */
-    protected $key;
+    protected $mailjet;
 
     /**
-     * The Mailjet API secret.
+     * Create a new Mailjet transport instance.
      *
-     * @var string
-     */
-    protected $secret;
-
-    /**
-     * THe Mailjet API end-point.
-     *
-     * @var string
-     */
-    protected $url;
-
-    /**
-     * Create a new Mailgun transport instance.
-     *
-     * @param  string  $key
-     * @param  string  $secret
+     * @param  \Sboo\Laravel5Mailjet\Api\Mailjet  $mailin
      * @return void
      */
-    public function __construct($key, $secret)
+    public function __construct(Mailjet $mailjet)
     {
-        $this->key = $key;
-        $this->secret = $secret;
-        $this->url = 'https://api.mailjet.com/v3/send/message';
+        $this->mailjet = $mailjet;
     }
 
     /**
      * {@inheritdoc}
      */
-    public function isStarted()
+    public function send(Swift_Mime_SimpleMessage $message, &$failedRecipients = null)
     {
-        return true;
-    }
+        $this->beforeSendPerformed($message);
 
-    /**
-     * {@inheritdoc}
-     */
-    public function start()
-    {
-        return true;
-    }
-
-    /**
-     * {@inheritdoc}
-     */
-    public function stop()
-    {
-        return true;
-    }
-
-    /**
-     * {@inheritdoc}
-     */
-    public function send(Swift_Mime_Message $message, &$failedRecipients = null)
-    {
-        $client = $this->getHttpClient();
-
-        return $client->post($this->url, ['auth' => [$this->key, $this->secret],
-            'body' => $this->getBody($message)
-        ]);
-    }
-
-    /**
-     * {@inheritdoc}
-     */
-    public function registerPlugin(Swift_Events_EventListener $plugin)
-    {
-        //
-    }
-
-    /**
-     * Get the "to" payload field for the API request.
-     *
-     * @param  \Swift_Mime_Message  $message
-     * @return array
-     */
-    protected function getTo(Swift_Mime_Message $message)
-    {
-        $formatted = [];
-
-        $contacts = array_merge(
-            (array) $message->getTo(), (array) $message->getCc(), (array) $message->getBcc()
+        $response = $this->mailjet->send(
+            $this->buildData($message)
         );
 
-        foreach ($contacts as $address => $display)
-        {
-            $formatted[] = $display ? $display." <$address>" : $address;
+        var_dump($this->mailjet->getResponseCode(), $response);
+
+        if (!$response) {
+            throw new MailjetTransportException("Unknown error");
         }
 
-        return implode(',', $formatted);
+        if ($res['code'] != 'success') {
+            throw new MailjetTransportException($res['message']);
+        }
+
+        // Should return the number of recipients who were accepted for delivery.
+        return 0;
     }
 
     /**
-     * Get the "from" payload field for the API request.
+     * Transforms Swift_Message into data array for SendinBlue's API
+     * cf. https://apidocs.sendinblue.com/tutorial-sending-transactional-email/
      *
-     * @param  \Swift_Mime_Message  $message
+     * @todo implements headers, inline_image
+     * @param  Swift_Mime_SimpleMessage $message
      * @return array
      */
-    protected function getFrom(Swift_Mime_Message $message)
+    protected function buildData($message)
     {
-        $formatted = [];
-        foreach ($message->getFrom() as $address => $display)
-        {
-            $formatted[] = $display ? $display." <$address>" : $address;
-        }
+        $data = [
+            'method' => 'POST'
+        ];
 
-        return $formatted[0];
-    }
-
-    /**
-     * Get the "body" payload field for the Guzzle request.
-     *
-     * @param Swift_Mime_Message $message
-     * @return PostBody
-     */
-    protected function getBody(Swift_Mime_Message $message) {
-        $body = new PostBody();
-        $body->setField('from', $this->getFrom($message));
-        $body->setField('to',   $this->getTo($message) );
-        $body->setField('subject',   $message->getSubject() );
-
-        $messageHtml = $message->getBody();
-        if($message->getChildren()) {
-            foreach($message->getChildren() as $child) {
-
-                if(str_contains($messageHtml, $child->getId())) {
-                    $messageHtml = str_replace($child->getId(),$child->getFilename(),$messageHtml);
-                    $body->addFile(new PostFile(
-                            'inlineattachment',
-                            $child->getBody(),
-                            $child->getFilename(),
-                            ['Content-Type' => $child->getContentType()]
-                        )
-                    );
-                } else {
-                    switch(get_class($child)) {
-                        case 'Swift_Attachment':
-                        case 'Swift_Image':
-                            $body->addFile(new PostFile(
-                                    'attachment',
-                                    $child->getBody(),
-                                    $child->getFilename(),
-                                    ['Content-Type' => $child->getContentType()]
-                                )
-                            );
-                            break;
-                        case 'Swift_MimePart':
-                            switch($child->getContentType()){
-                                case 'text/plain':
-                                    $body->setField('text',   $child->getBody() );
-                                    break;
-                            }
-                            break;
-                    }
+        if ($message->getHeaders()) {
+            $headers = $message->getHeaders()->getAll();
+            foreach( $headers as $header) {
+                if( $header instanceof Swift_Mime_Headers_UnstructuredHeader ) {
+                    $data['Headers'][$header->getFieldName()] = $header->getValue();
                 }
             }
         }
-        $body->setField('html',   $messageHtml );
-        return $body;
+
+        if ($message->getTo()) {
+            $data['To'] = $this->toCommaSeparatedString($message->getTo());
+        }
+
+        if ($message->getSubject()) {
+            $data['Subject'] = $message->getSubject();
+        }
+
+        if ($message->getFrom()) {
+            $from = $message->getFrom();
+            reset($from);
+            $key = key($from);
+            $data['From'] = [$key, $from[$key]];
+        }
+
+        // set content
+        if ($message->getContentType() == 'text/plain') {
+            $data['Text-part'] = $message->getBody();
+        } else {
+            $data['Html-part'] = $message->getBody();
+        }
+
+        $children = $message->getChildren();
+        foreach ($children as $child) {
+            if ($child instanceof Swift_MimePart && $child->getContentType() == 'text/plain') {
+                $data['Text-part'] = $child->getBody();
+            }
+        }
+
+        if (! isset($data['Text-part'])) {
+            $data['Text-part'] = strip_tags($message->getBody());
+        }
+        // end set content
+
+        if ($message->getCc()) {
+            $data['Cc'] = $this->toCommaSeparatedString($message->getCc());
+        }
+
+        if ($message->getBcc()) {
+            $data['Bcc'] = $this->toCommaSeparatedString($message->getBcc());
+        }
+
+        if ($message->getReplyTo()) {
+            $replyTo = $message->getReplyTo();
+            reset($replyTo);
+            $key = key($replyTo);
+            $data['ReplyTo'] = [$key, $replyTo[$key]];
+        }
+
+        // attachment
+        $attachment = [];
+        foreach ($children as $child) {
+            if ($child instanceof Swift_Attachment) {
+                $filename = $child->getFilename();
+                $content = chunk_split(base64_encode($child->getBody()));
+                $attachment[$filename] = $content;
+            }
+        }
+
+        if (count($attachment)) {
+            $data['attachment'] = $attachment;
+        }
+
+        return $data;
     }
 
-    /**
-     * Get a new HTTP client instance.
-     *
-     * @return \GuzzleHttp\Client
-     */
-    protected function getHttpClient()
-    {
-        return new Client;
+    protected function toCommaSeparatedString($addresses) {
+        return collect($addresses)
+            ->map(function ($name, $email) {
+                if (is_null($name))
+                    return $email;
+                return sprintf('"%s" <%s>', $name, $email);
+            })
+            ->implode(',');
     }
-
-    /**
-     * Get the API key being used by the transport.
-     *
-     * @return string
-     */
-    public function getKey()
-    {
-        return $this->key;
-    }
-
-    /**
-     * Set the API key being used by the transport.
-     *
-     * @param  string  $key
-     * @return void
-     */
-    public function setKey($key)
-    {
-        return $this->key = $key;
-    }
-
-    /**
-     * Get the API secret being used by the transport.
-     *
-     * @return string
-     */
-    public function getSecret()
-    {
-        return $this->secret;
-    }
-
-    /**
-     * Set the API secret being used by the transport.
-     *
-     * @param  string  $secret
-     * @return void
-     */
-    public function setSecret($secret)
-    {
-        return $this->secret = $secret;
-    }
-
 }
