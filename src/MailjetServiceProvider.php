@@ -95,7 +95,7 @@ class MailjetServiceProvider extends ServiceProvider {
         // Once we have the transporter registered, we will register the actual Swift
         // mailer instance, passing in the transport instances, which allows us to
         // override this transporter instances during app start-up if necessary.
-        $this->app['swift.mailer'] = $this->app->share(function($app)
+        $this->app->singleton('swift.mailer', function($app)
         {
             return new Swift_Mailer($app['swift.transport']->driver());
         });
@@ -108,7 +108,7 @@ class MailjetServiceProvider extends ServiceProvider {
      */
     protected function registerSwiftTransport()
     {
-        $this->app['swift.transport'] = $this->app->share(function($app)
+        $this->app->singleton('swift.transport', function($app)
         {
             return new TransportManager($app);
         });
